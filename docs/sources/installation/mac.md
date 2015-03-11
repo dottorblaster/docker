@@ -44,7 +44,7 @@ practice, work through the exercises on this page.
 
 ## Install Boot2Docker
  
-1. Go to the [boo2docker/osx-installer ](
+1. Go to the [boot2docker/osx-installer ](
 https://github.com/boot2docker/osx-installer/releases/latest) release page.
 
 4. Download Boot2Docker by clicking `Boot2Docker-x.x.x.pkg` in the "Downloads"
@@ -83,7 +83,7 @@ application:
 Once the launch completes, you can run `docker` commands. A good way to verify
 your setup succeeded is to run the `hello-world` container.
 
-		$ docker hello-world
+		$ docker run hello-world
 		Unable to find image 'hello-world:latest' locally
 		511136ea3c5a: Pull complete 
 		31cbccb51277: Pull complete 
@@ -117,7 +117,7 @@ Initialize and run `boot2docker` from the command line, do the following:
 
 1. Create a new Boot2Docker VM.
 
-		$ boo2docker init
+		$ boot2docker init
 
 	This creates a new virtual machine. You only need to run this command once.
 
@@ -146,7 +146,7 @@ Initialize and run `boot2docker` from the command line, do the following:
 
 5. Run the `hello-world` container to verify your setup.
 
-		$ docker hello-world		
+		$ docker run hello-world		
 
 
 ## Basic Boot2Docker Exercises
@@ -186,7 +186,7 @@ Work through this section to try some practical container tasks using `boot2dock
 	This tells you that the `web` container's port `80` is mapped to port
 	`49157` on your Docker host.
 
-4. Enter the `https://localhost:49157` address (`localhost` is `0.0.0.0`) in your browser:
+4. Enter the `http://localhost:49157` address (`localhost` is `0.0.0.0`) in your browser:
 
 	   ![Bad Address](/installation/images/bad_host.png)
 
@@ -199,7 +199,7 @@ Work through this section to try some practical container tasks using `boot2dock
 		$ boot2docker ip
 		192.168.59.103
 		
-6. Enter the `https://192.168.59.103:49157` address in your browser:
+6. Enter the `http://192.168.59.103:49157` address in your browser:
 
 	![Correct Addressing](/installation/images/good_host.png)
 
@@ -234,7 +234,7 @@ The next exercise demonstrates how to do this.
 	
 5. Start a new `nginx` container and replace the `html` folder with your `site` directory.
 
-		$ docker run -d -P -v /Users/mary/site:/usr/share/nginx/html --name mysite nginx
+		$ docker run -d -P -v $HOME/site:/usr/share/nginx/html --name mysite nginx
 	
 6. Get the `mysite` container's port.
 
@@ -290,7 +290,7 @@ To upgrade any version of Boot2Docker, do this:
 
 		$ boot2docker stop
 
-3. Go to the [boo2docker/osx-installer ](
+3. Go to the [boot2docker/osx-installer ](
    https://github.com/boot2docker/osx-installer/releases/latest) release page.
    
 4. Download Boot2Docker by clicking `Boot2Docker-x.x.x.pkg` in the "Downloads"

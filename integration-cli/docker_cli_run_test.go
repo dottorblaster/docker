@@ -511,20 +511,8 @@ func TestVolumesFromGetsProperMode(t *testing.T) {
 func TestRunNoDupVolumes(t *testing.T) {
 	defer deleteAllContainers()
 
-	bindPath1, err := ioutil.TempDir("", "test1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.Remove(bindPath1)
-
-	bindPath2, err := ioutil.TempDir("", "test2")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.Remove(bindPath2)
-
-	mountstr1 := bindPath1 + ":/someplace"
-	mountstr2 := bindPath2 + ":/someplace"
+	mountstr1 := randomUnixTmpDirPath("test1") + ":/someplace"
+	mountstr2 := randomUnixTmpDirPath("test2") + ":/someplace"
 
 	cmd := exec.Command(dockerBinary, "run", "-v", mountstr1, "-v", mountstr2, "busybox", "true")
 	if out, _, err := runCommandWithOutput(cmd); err == nil {
@@ -881,7 +869,7 @@ func TestRunEnvironmentErase(t *testing.T) {
 	defer deleteAllContainers()
 
 	cmd := exec.Command(dockerBinary, "run", "-e", "FOO", "-e", "HOSTNAME", "busybox", "env")
-	cmd.Env = appendDockerHostEnv([]string{})
+	cmd.Env = appendBaseEnv([]string{})
 
 	out, _, err := runCommandWithOutput(cmd)
 	if err != nil {
@@ -920,7 +908,7 @@ func TestRunEnvironmentOverride(t *testing.T) {
 	defer deleteAllContainers()
 
 	cmd := exec.Command(dockerBinary, "run", "-e", "HOSTNAME", "-e", "HOME=/root2", "busybox", "env")
-	cmd.Env = appendDockerHostEnv([]string{"HOSTNAME=bar"})
+	cmd.Env = appendBaseEnv([]string{"HOSTNAME=bar"})
 
 	out, _, err := runCommandWithOutput(cmd)
 	if err != nil {
@@ -1360,6 +1348,7 @@ func TestRunAddingOptionalDevices(t *testing.T) {
 }
 
 func TestRunModeHostname(t *testing.T) {
+	testRequires(t, SameHostDaemon)
 	defer deleteAllContainers()
 
 	cmd := exec.Command(dockerBinary, "run", "-h=testhostname", "busybox", "cat", "/etc/hostname")
@@ -1429,6 +1418,7 @@ func TestRunDisallowBindMountingRootToRoot(t *testing.T) {
 // Verify that a container gets default DNS when only localhost resolvers exist
 func TestRunDnsDefaultOptions(t *testing.T) {
 	defer deleteAllContainers()
+	testRequires(t, SameHostDaemon)
 
 	// preserve original resolv.conf for restoring after test
 	origResolvConf, err := ioutil.ReadFile("/etc/resolv.conf")
@@ -1473,9 +1463,14 @@ func TestRunDnsOptions(t *testing.T) {
 
 	cmd := exec.Command(dockerBinary, "run", "--dns=127.0.0.1", "--dns-search=mydomain", "busybox", "cat", "/etc/resolv.conf")
 
-	out, _, err := runCommandWithOutput(cmd)
+	out, stderr, _, err := runCommandWithStdoutStderr(cmd)
 	if err != nil {
 		t.Fatal(err, out)
+	}
+
+	// The client will get a warning on stderr when setting DNS to a localhost address; verify this:
+	if !strings.Contains(stderr, "Localhost DNS setting") {
+		t.Fatalf("Expected warning on stderr about localhost resolver, but got %q", stderr)
 	}
 
 	actual := strings.Replace(strings.Trim(out, "\r\n"), "\n", " ", -1)
@@ -1485,7 +1480,7 @@ func TestRunDnsOptions(t *testing.T) {
 
 	cmd = exec.Command(dockerBinary, "run", "--dns=127.0.0.1", "--dns-search=.", "busybox", "cat", "/etc/resolv.conf")
 
-	out, _, err = runCommandWithOutput(cmd)
+	out, _, _, err = runCommandWithStdoutStderr(cmd)
 	if err != nil {
 		t.Fatal(err, out)
 	}
@@ -1500,8 +1495,7 @@ func TestRunDnsOptions(t *testing.T) {
 
 func TestRunDnsOptionsBasedOnHostResolvConf(t *testing.T) {
 	defer deleteAllContainers()
-
-	var out string
+	testRequires(t, SameHostDaemon)
 
 	origResolvConf, err := ioutil.ReadFile("/etc/resolv.conf")
 	if os.IsNotExist(err) {
@@ -1511,9 +1505,9 @@ func TestRunDnsOptionsBasedOnHostResolvConf(t *testing.T) {
 	hostNamservers := resolvconf.GetNameservers(origResolvConf)
 	hostSearch := resolvconf.GetSearchDomains(origResolvConf)
 
+	var out string
 	cmd := exec.Command(dockerBinary, "run", "--dns=127.0.0.1", "busybox", "cat", "/etc/resolv.conf")
-
-	if out, _, err = runCommandWithOutput(cmd); err != nil {
+	if out, _, _, err = runCommandWithStdoutStderr(cmd); err != nil {
 		t.Fatal(err, out)
 	}
 
@@ -1600,6 +1594,9 @@ func TestRunDnsOptionsBasedOnHostResolvConf(t *testing.T) {
 // stopped and have an unmodified copy of resolv.conf, as well as
 // marking running containers as requiring an update on next restart
 func TestRunResolvconfUpdater(t *testing.T) {
+	// Because overlay doesn't support inotify properly, we need to skip
+	// this test if the docker daemon has Storage Driver == overlay
+	testRequires(t, SameHostDaemon, NotOverlay)
 
 	tmpResolvConf := []byte("search pommesfrites.fr\nnameserver 12.34.56.78")
 	tmpLocalhostResolvConf := []byte("nameserver 127.0.0.1")
@@ -1607,6 +1604,14 @@ func TestRunResolvconfUpdater(t *testing.T) {
 	//take a copy of resolv.conf for restoring after test completes
 	resolvConfSystem, err := ioutil.ReadFile("/etc/resolv.conf")
 	if err != nil {
+		t.Fatal(err)
+	}
+
+	// This test case is meant to test monitoring resolv.conf when it is
+	// a regular file not a bind mount. So we unmount resolv.conf and replace
+	// it with a file containing the original settings.
+	cmd := exec.Command("umount", "/etc/resolv.conf")
+	if _, err = runCommand(cmd); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1619,7 +1624,7 @@ func TestRunResolvconfUpdater(t *testing.T) {
 	}()
 
 	//1. test that a non-running container gets an updated resolv.conf
-	cmd := exec.Command(dockerBinary, "run", "--name='first'", "busybox", "true")
+	cmd = exec.Command(dockerBinary, "run", "--name='first'", "busybox", "true")
 	if _, err := runCommand(cmd); err != nil {
 		t.Fatal(err)
 	}
@@ -1740,6 +1745,45 @@ func TestRunResolvconfUpdater(t *testing.T) {
 	expected := "\nnameserver 8.8.8.8\nnameserver 8.8.4.4"
 	if !bytes.Equal(containerResolv, []byte(expected)) {
 		t.Fatalf("Container does not have cleaned/replaced DNS in resolv.conf; expected %q, got %q", expected, string(containerResolv))
+	}
+
+	//6. Test that replacing (as opposed to modifying) resolv.conf triggers an update
+	//   of containers' resolv.conf.
+
+	// Restore the original resolv.conf
+	if err := ioutil.WriteFile("/etc/resolv.conf", resolvConfSystem, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Run the container so it picks up the old settings
+	cmd = exec.Command(dockerBinary, "run", "--name='third'", "busybox", "true")
+	if _, err := runCommand(cmd); err != nil {
+		t.Fatal(err)
+	}
+	containerID3, err := getIDByName("third")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a modified resolv.conf.aside and override resolv.conf with it
+	bytesResolvConf = []byte(tmpResolvConf)
+	if err := ioutil.WriteFile("/etc/resolv.conf.aside", bytesResolvConf, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	err = os.Rename("/etc/resolv.conf.aside", "/etc/resolv.conf")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	time.Sleep(time.Second / 2)
+	// check for update in container
+	containerResolv, err = readContainerFile(containerID3, "resolv.conf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(containerResolv, bytesResolvConf) {
+		t.Fatalf("Stopped container does not have updated resolv.conf; expected\n%q\n got\n%q", tmpResolvConf, string(containerResolv))
 	}
 
 	//cleanup, restore original resolv.conf happens in defer func()
@@ -2188,6 +2232,7 @@ func TestRunEntrypoint(t *testing.T) {
 }
 
 func TestRunBindMounts(t *testing.T) {
+	testRequires(t, SameHostDaemon)
 	defer deleteAllContainers()
 
 	tmpDir, err := ioutil.TempDir("", "docker-test-container")
@@ -2249,11 +2294,12 @@ func TestRunCidFileCleanupIfEmpty(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 	tmpCidFile := path.Join(tmpDir, "cid")
-	cmd := exec.Command(dockerBinary, "run", "--cidfile", tmpCidFile, "scratch")
+	cmd := exec.Command(dockerBinary, "run", "--cidfile", tmpCidFile, "emptyfs")
 	out, _, err := runCommandWithOutput(cmd)
-	t.Log(out)
 	if err == nil {
-		t.Fatal("Run without command must fail")
+		t.Fatalf("Run without command must fail. out=%s", out)
+	} else if !strings.Contains(out, "No command specified") {
+		t.Fatalf("Run without command failed with wrong output. out=%s\nerr=%v", out, err)
 	}
 
 	if _, err := os.Stat(tmpCidFile); err == nil {
@@ -2353,8 +2399,23 @@ func TestRunInspectMacAddress(t *testing.T) {
 	logDone("run - inspecting MAC address")
 }
 
+// test docker run use a invalid mac address
+func TestRunWithInvalidMacAddress(t *testing.T) {
+	defer deleteAllContainers()
+
+	runCmd := exec.Command(dockerBinary, "run", "--mac-address", "92:d0:c6:0a:29", "busybox")
+	out, _, err := runCommandWithOutput(runCmd)
+	//use a invalid mac address should with a error out
+	if err == nil || !strings.Contains(out, "is not a valid mac address") {
+		t.Fatalf("run with an invalid --mac-address should with error out")
+	}
+
+	logDone("run - can't use an invalid mac address")
+}
+
 func TestRunDeallocatePortOnMissingIptablesRule(t *testing.T) {
 	defer deleteAllContainers()
+	testRequires(t, SameHostDaemon)
 
 	cmd := exec.Command(dockerBinary, "run", "-d", "-p", "23:23", "busybox", "top")
 	out, _, err := runCommandWithOutput(cmd)
@@ -2386,6 +2447,7 @@ func TestRunDeallocatePortOnMissingIptablesRule(t *testing.T) {
 
 func TestRunPortInUse(t *testing.T) {
 	defer deleteAllContainers()
+	testRequires(t, SameHostDaemon)
 
 	port := "1234"
 	l, err := net.Listen("tcp", ":"+port)
@@ -2407,6 +2469,8 @@ func TestRunPortInUse(t *testing.T) {
 
 // https://github.com/docker/docker/issues/8428
 func TestRunPortProxy(t *testing.T) {
+	testRequires(t, SameHostDaemon)
+
 	defer deleteAllContainers()
 
 	port := "12345"
@@ -2441,6 +2505,7 @@ func TestRunPortProxy(t *testing.T) {
 // Regression test for #7792
 func TestRunMountOrdering(t *testing.T) {
 	defer deleteAllContainers()
+	testRequires(t, SameHostDaemon)
 
 	tmpDir, err := ioutil.TempDir("", "docker_nested_mount_test")
 	if err != nil {
@@ -2484,6 +2549,7 @@ func TestRunMountOrdering(t *testing.T) {
 // Regression test for https://github.com/docker/docker/issues/8259
 func TestRunReuseBindVolumeThatIsSymlink(t *testing.T) {
 	defer deleteAllContainers()
+	testRequires(t, SameHostDaemon)
 
 	tmpDir, err := ioutil.TempDir(os.TempDir(), "testlink")
 	if err != nil {
@@ -2513,7 +2579,7 @@ func TestRunReuseBindVolumeThatIsSymlink(t *testing.T) {
 	logDone("run - can remount old bindmount volume")
 }
 
-//test create /etc volume
+//GH#10604: Test an "/etc" volume doesn't overlay special bind mounts in container
 func TestRunCreateVolumeEtc(t *testing.T) {
 	defer deleteAllContainers()
 
@@ -2523,7 +2589,7 @@ func TestRunCreateVolumeEtc(t *testing.T) {
 		t.Fatal("failed to run container: %v, output: %q", err, out)
 	}
 	if !strings.Contains(out, "nameserver 127.0.0.1") {
-		t.Fatal("failed: create /etc volume cover /etc/resolv.conf")
+		t.Fatal("/etc volume mount hides /etc/resolv.conf")
 	}
 
 	cmd = exec.Command(dockerBinary, "run", "-h=test123", "-v", "/etc", "busybox", "cat", "/etc/hostname")
@@ -2532,7 +2598,7 @@ func TestRunCreateVolumeEtc(t *testing.T) {
 		t.Fatal("failed to run container: %v, output: %q", err, out)
 	}
 	if !strings.Contains(out, "test123") {
-		t.Fatal("failed: create /etc volume cover /etc/hostname")
+		t.Fatal("/etc volume mount hides /etc/hostname")
 	}
 
 	cmd = exec.Command(dockerBinary, "run", "--add-host=test:192.168.0.1", "-v", "/etc", "busybox", "cat", "/etc/hosts")
@@ -2541,11 +2607,11 @@ func TestRunCreateVolumeEtc(t *testing.T) {
 		t.Fatal("failed to run container: %v, output: %q", err, out)
 	}
 	out = strings.Replace(out, "\n", " ", -1)
-	if !strings.Contains(out, "192.168.0.1"+"\t"+"test") || !strings.Contains(out, "127.0.0.1"+"\t"+"localhost") {
-		t.Fatal("failed: create /etc volume cover /etc/hosts", out)
+	if !strings.Contains(out, "192.168.0.1\ttest") || !strings.Contains(out, "127.0.0.1\tlocalhost") {
+		t.Fatal("/etc volume mount hides /etc/hosts")
 	}
 
-	logDone("run - create /etc volume success")
+	logDone("run - verify /etc volume doesn't hide special bind mounts")
 }
 
 func TestVolumesNoCopyData(t *testing.T) {
@@ -2579,6 +2645,8 @@ func TestVolumesNoCopyData(t *testing.T) {
 }
 
 func TestRunVolumesNotRecreatedOnStart(t *testing.T) {
+	testRequires(t, SameHostDaemon)
+
 	// Clear out any remnants from other tests
 	deleteAllContainers()
 	info, err := ioutil.ReadDir(volumesConfigPath)
@@ -2751,6 +2819,7 @@ func TestRunExposePort(t *testing.T) {
 }
 
 func TestRunUnknownCommand(t *testing.T) {
+	testRequires(t, NativeExecDriver)
 	defer deleteAllContainers()
 	runCmd := exec.Command(dockerBinary, "create", "busybox", "/bin/nada")
 	cID, _, _, err := runCommandWithStdoutStderr(runCmd)
@@ -2778,6 +2847,7 @@ func TestRunUnknownCommand(t *testing.T) {
 }
 
 func TestRunModeIpcHost(t *testing.T) {
+	testRequires(t, SameHostDaemon)
 	defer deleteAllContainers()
 
 	hostIpc, err := os.Readlink("/proc/1/ns/ipc")
@@ -2812,6 +2882,7 @@ func TestRunModeIpcHost(t *testing.T) {
 
 func TestRunModeIpcContainer(t *testing.T) {
 	defer deleteAllContainers()
+	testRequires(t, SameHostDaemon)
 
 	cmd := exec.Command(dockerBinary, "run", "-d", "busybox", "top")
 	out, _, err := runCommandWithOutput(cmd)
@@ -2851,6 +2922,7 @@ func TestRunModeIpcContainer(t *testing.T) {
 
 func TestContainerNetworkMode(t *testing.T) {
 	defer deleteAllContainers()
+	testRequires(t, SameHostDaemon)
 
 	cmd := exec.Command(dockerBinary, "run", "-d", "busybox", "top")
 	out, _, err := runCommandWithOutput(cmd)
@@ -2885,6 +2957,7 @@ func TestContainerNetworkMode(t *testing.T) {
 }
 
 func TestRunModePidHost(t *testing.T) {
+	testRequires(t, NativeExecDriver, SameHostDaemon)
 	defer deleteAllContainers()
 
 	hostPid, err := os.Readlink("/proc/1/ns/pid")
@@ -3029,7 +3102,9 @@ func TestRunNonLocalMacAddress(t *testing.T) {
 }
 
 func TestRunNetHost(t *testing.T) {
+	testRequires(t, SameHostDaemon)
 	defer deleteAllContainers()
+
 	hostNet, err := os.Readlink("/proc/1/ns/net")
 	if err != nil {
 		t.Fatal(err)
@@ -3108,6 +3183,25 @@ func TestRunOOMExitCode(t *testing.T) {
 	logDone("run - exit code on oom")
 }
 
+func TestRunSetDefaultRestartPolicy(t *testing.T) {
+	defer deleteAllContainers()
+	runCmd := exec.Command(dockerBinary, "run", "-d", "--name", "test", "busybox", "top")
+	if out, _, err := runCommandWithOutput(runCmd); err != nil {
+		t.Fatalf("failed to run container: %v, output: %q", err, out)
+	}
+	cmd := exec.Command(dockerBinary, "inspect", "-f", "{{.HostConfig.RestartPolicy.Name}}", "test")
+	out, _, err := runCommandWithOutput(cmd)
+	if err != nil {
+		t.Fatalf("failed to inspect container: %v, output: %q", err, out)
+	}
+	out = strings.Trim(out, "\r\n")
+	if out != "no" {
+		t.Fatalf("Set default restart policy failed")
+	}
+
+	logDone("run - set default restart policy success")
+}
+
 func TestRunRestartMaxRetries(t *testing.T) {
 	defer deleteAllContainers()
 	out, err := exec.Command(dockerBinary, "run", "-d", "--restart=on-failure:3", "busybox", "false").CombinedOutput()
@@ -3138,7 +3232,9 @@ func TestRunContainerWithWritableRootfs(t *testing.T) {
 }
 
 func TestRunContainerWithReadonlyRootfs(t *testing.T) {
+	testRequires(t, NativeExecDriver)
 	defer deleteAllContainers()
+
 	out, err := exec.Command(dockerBinary, "run", "--read-only", "--rm", "busybox", "touch", "/file").CombinedOutput()
 	if err == nil {
 		t.Fatal("expected container to error on run with read only error")

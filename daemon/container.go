@@ -14,6 +14,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/docker/libcontainer"
+	"github.com/docker/libcontainer/configs"
 	"github.com/docker/libcontainer/devices"
 	"github.com/docker/libcontainer/label"
 
@@ -25,11 +27,14 @@ import (
 	"github.com/docker/docker/nat"
 	"github.com/docker/docker/pkg/archive"
 	"github.com/docker/docker/pkg/broadcastwriter"
+	"github.com/docker/docker/pkg/common"
+	"github.com/docker/docker/pkg/directory"
 	"github.com/docker/docker/pkg/ioutils"
 	"github.com/docker/docker/pkg/networkfs/etchosts"
 	"github.com/docker/docker/pkg/networkfs/resolvconf"
 	"github.com/docker/docker/pkg/promise"
 	"github.com/docker/docker/pkg/symlink"
+	"github.com/docker/docker/pkg/ulimit"
 	"github.com/docker/docker/runconfig"
 	"github.com/docker/docker/utils"
 )
@@ -256,18 +261,18 @@ func populateCommand(c *Container, env []string) error {
 	pid.HostPid = c.hostConfig.PidMode.IsHost()
 
 	// Build lists of devices allowed and created within the container.
-	userSpecifiedDevices := make([]*devices.Device, len(c.hostConfig.Devices))
+	userSpecifiedDevices := make([]*configs.Device, len(c.hostConfig.Devices))
 	for i, deviceMapping := range c.hostConfig.Devices {
-		device, err := devices.GetDevice(deviceMapping.PathOnHost, deviceMapping.CgroupPermissions)
+		device, err := devices.DeviceFromPath(deviceMapping.PathOnHost, deviceMapping.CgroupPermissions)
 		if err != nil {
 			return fmt.Errorf("error gathering device information while adding custom device %q: %s", deviceMapping.PathOnHost, err)
 		}
 		device.Path = deviceMapping.PathInContainer
 		userSpecifiedDevices[i] = device
 	}
-	allowedDevices := append(devices.DefaultAllowedDevices, userSpecifiedDevices...)
+	allowedDevices := append(configs.DefaultAllowedDevices, userSpecifiedDevices...)
 
-	autoCreatedDevices := append(devices.DefaultAutoCreatedDevices, userSpecifiedDevices...)
+	autoCreatedDevices := append(configs.DefaultAutoCreatedDevices, userSpecifiedDevices...)
 
 	// TODO: this can be removed after lxc-conf is fully deprecated
 	lxcConfig, err := mergeLxcConfIntoOptions(c.hostConfig)
@@ -275,11 +280,34 @@ func populateCommand(c *Container, env []string) error {
 		return err
 	}
 
+	var rlimits []*ulimit.Rlimit
+	ulimits := c.hostConfig.Ulimits
+
+	// Merge ulimits with daemon defaults
+	ulIdx := make(map[string]*ulimit.Ulimit)
+	for _, ul := range ulimits {
+		ulIdx[ul.Name] = ul
+	}
+	for name, ul := range c.daemon.config.Ulimits {
+		if _, exists := ulIdx[name]; !exists {
+			ulimits = append(ulimits, ul)
+		}
+	}
+
+	for _, limit := range ulimits {
+		rl, err := limit.GetRlimit()
+		if err != nil {
+			return err
+		}
+		rlimits = append(rlimits, rl)
+	}
+
 	resources := &execdriver.Resources{
 		Memory:     c.Config.Memory,
 		MemorySwap: c.Config.MemorySwap,
 		CpuShares:  c.Config.CpuShares,
 		Cpuset:     c.Config.Cpuset,
+		Rlimits:    rlimits,
 	}
 
 	processConfig := execdriver.ProcessConfig{
@@ -704,7 +732,7 @@ func (container *Container) Kill() error {
 	if _, err := container.WaitStop(10 * time.Second); err != nil {
 		// Ensure that we don't kill ourselves
 		if pid := container.GetPid(); pid != 0 {
-			log.Infof("Container %s failed to exit within 10 seconds of kill - trying direct SIGKILL", utils.TruncateID(container.ID))
+			log.Infof("Container %s failed to exit within 10 seconds of kill - trying direct SIGKILL", common.TruncateID(container.ID))
 			if err := syscall.Kill(pid, 9); err != nil {
 				if err != syscall.ESRCH {
 					return err
@@ -884,7 +912,7 @@ func (container *Container) GetSize() (int64, int64) {
 	}
 
 	if _, err = os.Stat(container.basefs); err != nil {
-		if sizeRootfs, err = utils.TreeSize(container.basefs); err != nil {
+		if sizeRootfs, err = directory.Size(container.basefs); err != nil {
 			sizeRootfs = -1
 		}
 	}
@@ -946,7 +974,7 @@ func (container *Container) Exposes(p nat.Port) bool {
 	return exists
 }
 
-func (container *Container) GetPtyMaster() (*os.File, error) {
+func (container *Container) GetPtyMaster() (libcontainer.Console, error) {
 	ttyConsole, ok := container.command.ProcessConfig.Terminal.(execdriver.TtyTerminal)
 	if !ok {
 		return nil, ErrNoTTY
@@ -1234,7 +1262,7 @@ func (container *Container) setupLinkedContainers() ([]string, error) {
 		container.activeLinks = make(map[string]*links.Link, len(children))
 
 		// If we encounter an error make sure that we rollback any network
-		// config and ip table changes
+		// config and iptables changes
 		rollback := func() {
 			for _, link := range container.activeLinks {
 				link.Disable()

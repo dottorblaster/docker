@@ -183,12 +183,36 @@ Four different options affect container domain name services.
     only look up `host` but also `host.example.com`.
     Use `--dns-search=.` if you don't wish to set the search domain.
 
-Note that Docker, in the absence of either of the last two options
-above, will make `/etc/resolv.conf` inside of each container look like
-the `/etc/resolv.conf` of the host machine where the `docker` daemon is
-running.  You might wonder what happens when the host machine's
+Regarding DNS settings, in the absence of either the `--dns=IP_ADDRESS...`
+or the `--dns-search=DOMAIN...` option, Docker makes each container's
+`/etc/resolv.conf` look like the `/etc/resolv.conf` of the host machine (where
+the `docker` daemon runs).  When creating the container's `/etc/resolv.conf`,
+the daemon filters out all localhost IP address `nameserver` entries from
+the host's original file.
+
+Filtering is necessary because all localhost addresses on the host are
+unreachable from the container's network.  After this filtering, if there 
+are no more `nameserver` entries left in the container's `/etc/resolv.conf`
+file, the daemon adds public Google DNS nameservers
+(8.8.8.8 and 8.8.4.4) to the container's DNS configuration.  If IPv6 is
+enabled on the daemon, the public IPv6 Google DNS nameservers will also
+be added (2001:4860:4860::8888 and 2001:4860:4860::8844).
+
+> **Note**:
+> If you need access to a host's localhost resolver, you must modify your
+> DNS service on the host to listen on a non-localhost address that is
+> reachable from within the container.
+
+You might wonder what happens when the host machine's
 `/etc/resolv.conf` file changes.  The `docker` daemon has a file change
 notifier active which will watch for changes to the host DNS configuration.
+
+> **Note**:
+> The file change notifier relies on the Linux kernel's inotify feature.
+> Because this feature is currently incompatible with the overlay filesystem 
+> driver, a Docker daemon using "overlay" will not be able to take advantage
+> of the `/etc/resolv.conf` auto-update feature.
+
 When the host file changes, all stopped containers which have a matching
 `resolv.conf` to the host will be updated immediately to this newest host
 configuration.  Containers which are running when the host configuration
@@ -495,6 +519,67 @@ to `2001:db8:23:42:0:ffff:ffff:ffff` is attached to `eth0`, with the host listen
 at `2001:db8:23:42::1`. The subnet `2001:db8:23:42:1::/80` with an address range from
 `2001:db8:23:42:1:0:0:0` to `2001:db8:23:42:1:ffff:ffff:ffff` is attached to
 `docker0` and will be used by containers.
+
+#### Using NDP proxying
+
+If your Docker host is only part of an IPv6 subnet but has not got an IPv6
+subnet assigned you can use NDP proxying to connect your containers via IPv6 to
+the internet.
+For example your host has the IPv6 address `2001:db8::c001`, is part of the
+subnet `2001:db8::/64` and your IaaS provider allows you to configure the IPv6
+addresses `2001:db8::c000` to `2001:db8::c00f`:
+
+    $ ip -6 addr show
+    1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536
+        inet6 ::1/128 scope host
+           valid_lft forever preferred_lft forever
+    2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qlen 1000
+        inet6 2001:db8::c001/64 scope global
+           valid_lft forever preferred_lft forever
+        inet6 fe80::601:3fff:fea1:9c01/64 scope link
+           valid_lft forever preferred_lft forever
+
+Let's split up the configurable address range into two subnets
+`2001:db8::c000/125` and `2001:db8::c008/125`. The first one can be used by the
+host itself, the latter by Docker:
+
+    docker -d --ipv6 --fixed-cidr-v6 2001:db8::c008/125
+
+You notice the Docker subnet is within the subnet managed by your router that
+is connected to `eth0`. This means all devices (containers) with the addresses
+from the Docker subnet are expected to be found within the router subnet.
+Therefore the router thinks it can talk to these containers directly.
+
+![](/article-img/ipv6_ndp_proxying.svg)
+
+As soon as the router wants to send an IPv6 packet to the first container it
+will transmit a neighbor solicitation request, asking, who has
+`2001:db8::c009`? But it will get no answer because noone on this subnet has
+this address. The container with this address is hidden behind the Docker host.
+The Docker host has to listen to neighbor solication requests for the container
+address and send a response that itself is the device that is responsible for
+the address. This is done by a Kernel feature called `NDP Proxy`. You can
+enable it by executing
+
+    $ sysctl net.ipv6.conf.eth0.proxy_ndp=1
+
+Now you can add the container's IPv6 address to the NDP proxy table:
+
+    $ ip -6 neigh add proxy 2001:db8::c009 dev eth0
+
+This command tells the Kernel to answer to incoming neighbor solicitation requests
+regarding the IPv6 address `2001:db8::c009` on the device `eth0`. As a
+consequence of this all traffic to this IPv6 address will go into the Docker
+host and it will forward it according to its routing table via the `docker0`
+device to the container network:
+
+    $ ip -6 route show
+    2001:db8::c008/125 dev docker0  metric 1
+    2001:db8::/64 dev eth0  proto kernel  metric 256
+
+You have to execute the `ip -6 neigh add proxy ...` command for every IPv6
+address in your Docker subnet. Unfortunately there is no functionality for
+adding a whole subnet by executing one command.
 
 ### Docker IPv6 Cluster
 

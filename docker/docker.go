@@ -70,6 +70,10 @@ func main() {
 	setDefaultConfFlag(flTrustKey, defaultTrustKeyFile)
 
 	if *flDaemon {
+		if *flHelp {
+			flag.Usage()
+			return
+		}
 		mainDaemon()
 		return
 	}
@@ -111,7 +115,7 @@ func main() {
 			*flTls = true
 			cert, err := tls.LoadX509KeyPair(*flCert, *flKey)
 			if err != nil {
-				log.Fatalf("Couldn't load X509 key pair: %s. Key encrypted?", err)
+				log.Fatalf("Couldn't load X509 key pair: %q. Make sure the key is encrypted", err)
 			}
 			tlsConfig.Certificates = []tls.Certificate{cert}
 		}
